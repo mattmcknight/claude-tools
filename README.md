@@ -37,4 +37,4 @@ See `skills/bitbucket-pr/SKILL.md` for full documentation.
 
 ## License
 
-MIT
+None
