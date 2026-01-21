@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Merge a PR
+# Usage: bb-pr-merge PR_ID [PROJECT REPO]
+#   If PROJECT/REPO omitted, detects from git remote
+
+set -euo pipefail
+
+: "${BITBUCKET_TOKEN:?Set BITBUCKET_TOKEN}"
+: "${BITBUCKET_URL:?Set BITBUCKET_URL}"
+
+BITBUCKET_API="$BITBUCKET_URL/rest/api/1.0"
+BITBUCKET_USER="${BITBUCKET_USER:-$(git config user.email)}"
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: bb-pr-merge PR_ID [PROJECT REPO]" >&2
+  exit 1
+fi
+
+PR_ID="$1"
+
+if [[ $# -ge 3 ]]; then
+  PROJECT="$2"
+  REPO="$3"
+else
+  # Detect project/repo from git remote
+  remote=$(git remote get-url origin)
+  if [[ "$remote" =~ ^ssh:// ]]; then
+    PROJECT=$(echo "$remote" | sed -E 's|.*[:/]([^/]+)/[^/]+\.git$|\1|' | tr '[:lower:]' '[:upper:]')
+    REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+  elif [[ "$remote" =~ ^https:// ]]; then
+    PROJECT=$(echo "$remote" | sed -E 's|.*/scm/([^/]+)/.*|\1|' | tr '[:lower:]' '[:upper:]')
+    REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+  else
+    echo "ERROR: Unrecognized git remote format" >&2
+    exit 1
+  fi
+fi
+
+# Get current PR version (required for merge)
+PR_DATA=$(curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID" \
+  -H "Content-Type: application/json")
+
+VERSION=$(echo "$PR_DATA" | jq -r '.version')
+STATE=$(echo "$PR_DATA" | jq -r '.state')
+
+if [[ "$STATE" != "OPEN" ]]; then
+  echo "PR #$PR_ID is not open (state: $STATE)" >&2
+  exit 1
+fi
+
+# Merge
+RESULT=$(curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  -X POST \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID/merge?version=$VERSION" \
+  -H "Content-Type: application/json")
+
+MERGED_STATE=$(echo "$RESULT" | jq -r '.state // empty')
+ERROR=$(echo "$RESULT" | jq -r '.errors[0].message // empty')
+
+if [[ "$MERGED_STATE" == "MERGED" ]]; then
+  echo "PR #$PR_ID merged successfully"
+else
+  echo "Merge failed: ${ERROR:-unknown error}" >&2
+  exit 1
+fi

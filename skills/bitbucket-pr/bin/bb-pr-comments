@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Get PR comments from Bitbucket Data Center
+# Usage: bb-pr-comments [PR_ID]
+#   If PR_ID omitted, finds PR for current branch
+
+set -euo pipefail
+
+# Check required env vars
+: "${BITBUCKET_TOKEN:?Set BITBUCKET_TOKEN}"
+: "${BITBUCKET_URL:?Set BITBUCKET_URL}"
+
+BITBUCKET_API="$BITBUCKET_URL/rest/api/1.0"
+BITBUCKET_USER="${BITBUCKET_USER:-$(git config user.email)}"
+
+# Detect project/repo from git remote
+detect_repo() {
+  local remote
+  remote=$(git remote get-url origin)
+  
+  if [[ "$remote" =~ ^ssh:// ]]; then
+    PROJECT=$(echo "$remote" | sed -E 's|.*[:/]([^/]+)/[^/]+\.git$|\1|' | tr '[:lower:]' '[:upper:]')
+    REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+  elif [[ "$remote" =~ ^https:// ]]; then
+    PROJECT=$(echo "$remote" | sed -E 's|.*/scm/([^/]+)/.*|\1|' | tr '[:lower:]' '[:upper:]')
+    REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+  else
+    echo "ERROR: Unrecognized git remote format: $remote" >&2
+    exit 1
+  fi
+}
+
+# Find PR for current branch
+find_pr_for_branch() {
+  local branch pr_json
+  branch=$(git branch --show-current)
+  
+  pr_json=$(curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+    "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests?state=OPEN" \
+    -H "Content-Type: application/json")
+  
+  PR_ID=$(echo "$pr_json" | jq -r --arg branch "$branch" \
+    '.values[] | select(.fromRef.displayId == $branch) | .id')
+  
+  if [[ -z "$PR_ID" || "$PR_ID" == "null" ]]; then
+    echo "No open PR found for branch: $branch" >&2
+    echo "Open PRs:" >&2
+    echo "$pr_json" | jq -r '.values[] | "  #\(.id): \(.fromRef.displayId)"' >&2
+    exit 1
+  fi
+}
+
+detect_repo
+
+# Use provided PR_ID or find from current branch
+if [[ $# -ge 1 ]]; then
+  PR_ID="$1"
+else
+  find_pr_for_branch
+fi
+
+echo "PR #$PR_ID - $BITBUCKET_URL/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID" >&2
+
+# Fetch and format comments
+curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID/activities?limit=100" \
+  -H "Content-Type: application/json" \
+| jq '[
+  .values[]
+  | select(.action == "COMMENTED")
+  | select(.comment.state != "RESOLVED")
+  | {
+      id: .comment.id,
+      author: .comment.author.displayName,
+      text: .comment.text,
+      path: .commentAnchor.path,
+      line: .commentAnchor.line,
+      state: .comment.state,
+      severity: .comment.severity
+    }
+]'

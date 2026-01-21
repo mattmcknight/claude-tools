@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# List open PRs in the repository
+# Usage: bb-pr-list [--mine]
+
+set -euo pipefail
+
+: "${BITBUCKET_TOKEN:?Set BITBUCKET_TOKEN}"
+: "${BITBUCKET_URL:?Set BITBUCKET_URL}"
+
+BITBUCKET_API="$BITBUCKET_URL/rest/api/1.0"
+BITBUCKET_USER="${BITBUCKET_USER:-$(git config user.email)}"
+
+# Detect project/repo from git remote
+remote=$(git remote get-url origin)
+if [[ "$remote" =~ ^ssh:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*[:/]([^/]+)/[^/]+\.git$|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+elif [[ "$remote" =~ ^https:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*/scm/([^/]+)/.*|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+else
+  echo "ERROR: Unrecognized git remote format" >&2
+  exit 1
+fi
+
+FILTER_MINE=""
+if [[ "${1:-}" == "--mine" ]]; then
+  FILTER_MINE="1"
+fi
+
+# Fetch open PRs
+RESULT=$(curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests?state=OPEN&limit=50" \
+  -H "Content-Type: application/json")
+
+if [[ -n "$FILTER_MINE" ]]; then
+  echo "$RESULT" | jq --arg user "$BITBUCKET_USER" '[
+    .values[]
+    | select(.author.user.emailAddress == $user or .author.user.name == $user)
+    | {
+        id: .id,
+        title: .title,
+        branch: .fromRef.displayId,
+        author: .author.user.displayName
+      }
+  ]'
+else
+  echo "$RESULT" | jq '[
+    .values[]
+    | {
+        id: .id,
+        title: .title,
+        branch: .fromRef.displayId,
+        author: .author.user.displayName
+      }
+  ]'
+fi

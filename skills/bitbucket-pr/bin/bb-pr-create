@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Create a new PR
+# Usage: bb-pr-create "title" ["description"] [--to TARGET_BRANCH]
+#   Creates PR from current branch to main (or specified target)
+
+set -euo pipefail
+
+: "${BITBUCKET_TOKEN:?Set BITBUCKET_TOKEN}"
+: "${BITBUCKET_URL:?Set BITBUCKET_URL}"
+
+BITBUCKET_API="$BITBUCKET_URL/rest/api/1.0"
+BITBUCKET_USER="${BITBUCKET_USER:-$(git config user.email)}"
+
+usage() {
+  echo "Usage: bb-pr-create \"title\" [\"description\"] [--to TARGET_BRANCH]" >&2
+  echo "  Creates PR from current branch to main (default) or specified target" >&2
+  exit 1
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+TITLE=""
+DESCRIPTION=""
+TARGET_BRANCH="main"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --to)
+      TARGET_BRANCH="$2"
+      shift 2
+      ;;
+    *)
+      if [[ -z "$TITLE" ]]; then
+        TITLE="$1"
+      elif [[ -z "$DESCRIPTION" ]]; then
+        DESCRIPTION="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$TITLE" ]]; then
+  usage
+fi
+
+# Detect project/repo from git remote
+remote=$(git remote get-url origin)
+if [[ "$remote" =~ ^ssh:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*[:/]([^/]+)/[^/]+\.git$|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+elif [[ "$remote" =~ ^https:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*/scm/([^/]+)/.*|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+else
+  echo "ERROR: Unrecognized git remote format" >&2
+  exit 1
+fi
+
+FROM_BRANCH=$(git branch --show-current)
+
+if [[ "$FROM_BRANCH" == "$TARGET_BRANCH" ]]; then
+  echo "ERROR: Cannot create PR from $FROM_BRANCH to itself" >&2
+  exit 1
+fi
+
+# Build JSON payload safely with jq
+JSON_PAYLOAD=$(jq -n \
+  --arg title "$TITLE" \
+  --arg desc "$DESCRIPTION" \
+  --arg from "refs/heads/$FROM_BRANCH" \
+  --arg to "refs/heads/$TARGET_BRANCH" \
+  '{
+    title: $title,
+    description: $desc,
+    fromRef: { id: $from },
+    toRef: { id: $to }
+  }')
+
+RESULT=$(curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  -X POST \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests" \
+  -H "Content-Type: application/json" \
+  -d "$JSON_PAYLOAD")
+
+PR_ID=$(echo "$RESULT" | jq -r '.id // empty')
+ERROR=$(echo "$RESULT" | jq -r '.errors[0].message // empty')
+
+if [[ -n "$PR_ID" ]]; then
+  echo "Created PR #$PR_ID: $TITLE"
+  echo "URL: $BITBUCKET_URL/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID"
+else
+  echo "Failed to create PR: ${ERROR:-unknown error}" >&2
+  echo "$RESULT" | jq . >&2
+  exit 1
+fi

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Mark a PR comment as resolved
+# Usage: bb-pr-resolve PR_ID COMMENT_ID
+
+set -euo pipefail
+
+: "${BITBUCKET_TOKEN:?Set BITBUCKET_TOKEN}"
+: "${BITBUCKET_URL:?Set BITBUCKET_URL}"
+
+BITBUCKET_API="$BITBUCKET_URL/rest/api/1.0"
+BITBUCKET_USER="${BITBUCKET_USER:-$(git config user.email)}"
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: bb-pr-resolve PR_ID COMMENT_ID" >&2
+  exit 1
+fi
+
+PR_ID="$1"
+COMMENT_ID="$2"
+
+# Detect project/repo
+remote=$(git remote get-url origin)
+if [[ "$remote" =~ ^ssh:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*[:/]([^/]+)/[^/]+\.git$|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+elif [[ "$remote" =~ ^https:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*/scm/([^/]+)/.*|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+else
+  echo "ERROR: Unrecognized git remote format" >&2
+  exit 1
+fi
+
+# First get the current version of the comment
+CURRENT=$(curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID/comments/$COMMENT_ID" \
+  -H "Content-Type: application/json")
+
+VERSION=$(echo "$CURRENT" | jq -r '.version')
+
+curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  -X PUT \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID/comments/$COMMENT_ID" \
+  -H "Content-Type: application/json" \
+  -d "{\"state\": \"RESOLVED\", \"version\": $VERSION}"
+
+echo "Resolved comment $COMMENT_ID on PR #$PR_ID"

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Get PR details
+# Usage: bb-pr-info [PR_ID]
+#   If PR_ID omitted, finds PR for current branch
+
+set -euo pipefail
+
+: "${BITBUCKET_TOKEN:?Set BITBUCKET_TOKEN}"
+: "${BITBUCKET_URL:?Set BITBUCKET_URL}"
+
+BITBUCKET_API="$BITBUCKET_URL/rest/api/1.0"
+BITBUCKET_USER="${BITBUCKET_USER:-$(git config user.email)}"
+
+# Detect project/repo from git remote
+remote=$(git remote get-url origin)
+if [[ "$remote" =~ ^ssh:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*[:/]([^/]+)/[^/]+\.git$|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+elif [[ "$remote" =~ ^https:// ]]; then
+  PROJECT=$(echo "$remote" | sed -E 's|.*/scm/([^/]+)/.*|\1|' | tr '[:lower:]' '[:upper:]')
+  REPO=$(echo "$remote" | sed -E 's|.*/([^/]+)\.git$|\1|')
+else
+  echo "ERROR: Unrecognized git remote format" >&2
+  exit 1
+fi
+
+# Find PR ID if not provided
+if [[ $# -ge 1 ]]; then
+  PR_ID="$1"
+else
+  branch=$(git branch --show-current)
+  pr_json=$(curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+    "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests?state=OPEN" \
+    -H "Content-Type: application/json")
+  
+  PR_ID=$(echo "$pr_json" | jq -r --arg branch "$branch" \
+    '.values[] | select(.fromRef.displayId == $branch) | .id')
+  
+  if [[ -z "$PR_ID" || "$PR_ID" == "null" ]]; then
+    echo "No open PR found for branch: $branch" >&2
+    exit 1
+  fi
+fi
+
+# Fetch PR details
+curl -sf -u "$BITBUCKET_USER:$BITBUCKET_TOKEN" \
+  "$BITBUCKET_API/projects/$PROJECT/repos/$REPO/pull-requests/$PR_ID" \
+  -H "Content-Type: application/json" \
+| jq '{
+  id: .id,
+  title: .title,
+  state: .state,
+  author: .author.user.displayName,
+  fromBranch: .fromRef.displayId,
+  toBranch: .toRef.displayId,
+  reviewers: [.reviewers[] | {name: .user.displayName, status: .status}],
+  url: .links.self[0].href
+}'
